@@ -485,6 +485,14 @@ where
         }
     }
 
+    pub fn drain_with<F>(&mut self, f: F)
+    where
+        F: FnMut(T),
+    {
+        // call `f` for every moved out `T`
+        // at the end the storage Stash is empty and in a valid state
+    }
+
     /// Removes the element stored at the given index if any.
     ///
     /// This method acts similar to the take API and even still returns an Option.
