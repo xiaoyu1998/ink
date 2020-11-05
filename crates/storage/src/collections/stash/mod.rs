@@ -485,12 +485,20 @@ where
         }
     }
 
-    pub fn drain_with<F>(&mut self, f: F)
+    /// Drains this stash, calls `f` with each drained `T`.
+    pub fn drain_with<F>(&mut self, mut f: F)
     where
         F: FnMut(T),
     {
-        // call `f` for every moved out `T`
-        // at the end the storage Stash is empty and in a valid state
+        // Call `f` for every moved out `T`.
+        for index in 0..self.len() {
+            let entry = self.take(index);
+            if let Some(e) = entry {
+                f(e);
+            }
+        }
+        // At the end the stash must be empty and in a valid state.
+        debug_assert!(self.is_empty());
     }
 
     /// Removes the element stored at the given index if any.

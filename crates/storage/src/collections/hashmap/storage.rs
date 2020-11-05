@@ -132,7 +132,11 @@ where
     }
 
     fn clear_spread(&self, ptr: &mut KeyPtr) {
+        // Second call site of `clear_cells()`.
+        // `clear_spread` must take `&mut self` because `self.clear_cells()` does `drain_with`.
+        // This would change the trait.
         self.clear_cells();
+
         SpreadLayout::clear_spread(&self.keys, ptr);
         SpreadLayout::clear_spread(&self.values, ptr);
     }

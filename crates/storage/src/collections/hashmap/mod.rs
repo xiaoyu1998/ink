@@ -240,22 +240,16 @@ where
     H: CryptoHash,
     Key: From<<H as HashOutput>::Type>,
 {
-    fn clear_cells(&self) {
+    fn clear_cells(&mut self) {
         if self.values.key().is_none() {
             // We won't clear any storage if we are in lazy state since there
             // probably has not been any state written to storage, yet.
             return
         }
-        for key in self.keys() {
-            // It might seem wasteful to clear all entries instead of just
-            // the occupied ones. However this spares us from having one extra
-            // read for every element in the storage stash to filter out vacant
-            // entries. So this is actually a trade-off and at the time of this
-            // implementation it is unclear which path is more efficient.
-            //
-            // The bet is that clearing a storage cell is cheaper than reading one.
-            self.values.clear_packed_at(key);
-        }
+        let values = &self.values;
+        self.keys.drain_with(|key| {
+            values.clear_packed_at(&key);
+        });
     }
 }
 
