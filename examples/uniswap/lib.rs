@@ -21,11 +21,11 @@ pub mod uniswap_pair {
 
     #[cfg(not(feature = "ink-as-dependency"))]
     use ink_storage::{
+        collections::HashMap as StorageHashMap,
         lazy::Lazy,
     };
 
     use erc20::erc20;
-    use mpa20::mpa20;
 
     const MINIMUM_LIQUIDITY: Balance = 10**3;
 
@@ -34,10 +34,17 @@ pub mod uniswap_pair {
         owner:    AccountId,
         token0:   Lazy<erc20>,
         token1:   Lazy<erc20>,
-        lp_token: Lazy<mpa20>,
 
         reserve0: Balance,
         reserve1: Balance,
+
+        /// Total token supply.
+        total_supply: Lazy<Balance>,
+        /// Mapping from owner to number of owned token.
+        balances: StorageHashMap<AccountId, Balance>,
+        /// Mapping of the token amount which an account is allowed to withdraw
+        /// from another account.
+        allowances: StorageHashMap<(AccountId, AccountId), Balance>,
     }
 
     #[ink(event)]
@@ -86,21 +93,48 @@ pub mod uniswap_pair {
         to: AccountId,
     }
 
+    /// Event emitted when a token transfer occurs.
+    #[ink(event)]
+    pub struct Transfer {
+        #[ink(topic)]
+        from: Option<AccountId>,
+        #[ink(topic)]
+        to: Option<AccountId>,
+        #[ink(topic)]
+        value: Balance,
+    }
+
+    /// up to the amount of `value` tokens from `owner`.
+    #[ink(event)]
+    pub struct Approval {
+        #[ink(topic)]
+        owner: AccountId,
+        #[ink(topic)]
+        spender: AccountId,
+        #[ink(topic)]
+        value: Balance,
+    }
+
     impl Uniswap_pair {
         /// Creates a new uniswap_pair smart contract initialized with the given value.
         #[ink(constructor)]
-        pub fn new(token0: AccountId, token1: AccountId, lp_token:  AccountId) -> Self {
+        pub fn new(token0: AccountId, token1: AccountId) -> Self {
             Self { owner : Self.env().caller(),
                    token0: erc20::new(token0),  
                    token1: erc20::new(token1), 
-                   lp_token: mpa20::new(lp_token),
+                   //lp_token: mpa20::new(lp_token),
+                   total_supply: Lazy::new(0),
+                   balances:StorageHashMap::new(),
+                   allowances: StorageHashMap::new(),
             }
         }
 
         #[ink(message)]
         pub fn mint(&mut self, to: AccountId) {
-            let balance0 = self.token0.balance_of_or_zero(self);
-            let balance1 = self.token1.balance_of_or_zero(self);
+            let self_account_id = self.env().account_id();
+
+            let balance0 = self.token0.balance_of_or_zero(self_account_id);
+            let balance1 = self.token1.balance_of_or_zero(self_account_id);
 
             let amount0  = balance0 - self.reserve0;
             let amount1  = balance1 - self.reserve1;
@@ -111,7 +145,7 @@ pub mod uniswap_pair {
 
             if total_supply == 0 {
                 liquidity = math::sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
-                _mint(self, MINIMUM_LIQUIDITY)
+                _mint(self, self_account_id, MINIMUM_LIQUIDITY)
             } else {
                 liquidity = math::min(amount0 * total_supply / self.reserve0, amount1 * total_supply / self.reserve1);
             }
@@ -129,8 +163,10 @@ pub mod uniswap_pair {
 
             assert!(self.env().caller() == to, "Uniswap: auth mismatch"); 
 
-            let mut balance0 = self.token0.balance_of_or_zero(self);
-            let mut balance1 = self.token1.balance_of_or_zero(self);
+            let self_account_id = self.env().account_id();
+
+            let mut balance0 = self.token0.balance_of_or_zero(self_account_id);
+            let mut balance1 = self.token1.balance_of_or_zero(self_account_id);
 
             let liquidity    = self.lp_token.balance_of_or_zero(to);
             let total_supply = self.lp_token.total_supply();
@@ -145,8 +181,8 @@ pub mod uniswap_pair {
             self.token0.transfer_from(self, to, amount0);
             self.token1.transfer_from(self, to, amount1);
 
-            balance0 = self.token0.balance_of_or_zero(self);
-            balance1 = self.token1.balance_of_or_zero(self);
+            balance0 = self.token0.balance_of_or_zero(self_account_id);
+            balance1 = self.token1.balance_of_or_zero(self_account_id);
 
             update(balance0, balance1, self.reserve0, self.reserve1);
 
@@ -158,7 +194,8 @@ pub mod uniswap_pair {
 
             assert!(amount0Out > 0 || amount1Out > 0, "Uniswap: INSUFFICIENT_OUTPUT_AMOUNT"); 
             assert!(amount0Out < self.reserve0 && amount1Out < self.reserve1, "Uniswap: INSUFFICIENT_LIQUIDITY"); 
-            assert!(to != self.token0.get_address() && to != self.token1.get_address(), "Uniswap: INVALID_TO"); 
+            //assert!(to != self.token0.get_address() && to != self.token1.get_address(), "Uniswap: INVALID_TO"); 
+            let self_account_id = self.env().account_id();
 
             if amount0Out {
                 self.token0.transfer_from(self, to, amount0Out);
@@ -168,8 +205,8 @@ pub mod uniswap_pair {
                 self.token1.transfer_from(self, to, amount1Out);
             } 
 
-            let mut balance0 = self.token0.balance_of_or_zero(self);
-            let mut balance1 = self.token1.balance_of_or_zero(self);
+            let mut balance0 = self.token0.balance_of_or_zero(self_account_id);
+            let mut balance1 = self.token1.balance_of_or_zero(self_account_id);
 
             let amount0In = if balance0 > self.reserve0 - amount0Out {
                  balance0 - (self.reserve0 - amount0Out)
@@ -195,27 +232,14 @@ pub mod uniswap_pair {
             self.env().emit_event(Swap(self.env().caller(), amount0In, amount1In, amount0Out, amount1Out, to));       
         }
 
-        fn _burn(&mut self, to: AddressId, value: Balance) {
-            self.lp_token.burn(self, to, value);
-        }
-
-        fn _mint(&mut self, to: AddressId, value: Balance) {
-            self.lp_token.mint(self, to, value);
-        }
-
-        fn update(&mut self, balance0:Balance, balance1:Balance, reserve0:Balance, reserve1:Balance){
-            self.reserve0 = balance0;
-            self.reserve1 = balance1;
-
-            self.env().emit_event(Sync(self.reserve0, self.reserve1));
-        }
-
+        #[ink(message)]
         fn skim(&mut self, to: AccountId){ 
             assert!(self.env().caller() == self.owner, "Uniswap: auth mismatch"); 
             self.token0.transfer_from(self, to, self.token0.balance_of_or_zero(self) - self.reserve0);
             self.token1.transfer_from(self, to, self.token1.balance_of_or_zero(self) - self.reserve1);
         }
 
+        #[ink(message)]
         fn sync(&mut self){ 
             assert!(self.env().caller() == self.owner, "Uniswap: auth mismatch"); 
             update(self.token0.balance_of_or_zero(self), 
@@ -223,6 +247,143 @@ pub mod uniswap_pair {
                    self.reserve0, 
                    self.reserve1);
         }
+
+
+        /// Returns the total token supply.
+        #[ink(message)]
+        pub fn total_supply(&self) -> Balance {
+            *self.total_supply
+        }
+
+         /// Returns the account balance for the specified `owner`.
+        ///
+        /// Returns `0` if the account is non-existent.
+        #[ink(message)]
+        pub fn balance_of(&self, owner: AccountId) -> Balance {
+            self.balances.get(&owner).copied().unwrap_or(0)
+        }
+           
+        /// Returns the amount which `spender` is still allowed to withdraw from `owner`.
+        ///
+        /// Returns `0` if no allowance has been set `0`.
+        #[ink(message)]
+        pub fn allowance(&self, owner: AccountId, spender: AccountId) -> Balance {
+            self.allowances.get(&(owner, spender)).copied().unwrap_or(0)
+        }
+
+        /// Transfers `value` amount of tokens from the caller's account to account `to`.
+        ///
+        /// On success a `Transfer` event is emitted.
+        ///
+        /// # Errors
+        ///
+        /// Returns `InsufficientBalance` error if there are not enough tokens on
+        /// the caller's account balance.
+        #[ink(message)]
+        pub fn transfer(&mut self, to: AccountId, value: Balance) -> Result<()> {
+            let from = self.env().caller();
+            self.transfer_from_to(from, to, value)
+        }
+
+        /// Allows `spender` to withdraw from the caller's account multiple times, up to
+        /// the `value` amount.
+        ///
+        /// If this function is called again it overwrites the current allowance with `value`.
+        ///
+        /// An `Approval` event is emitted.
+        #[ink(message)]
+        pub fn approve(&mut self, spender: AccountId, value: Balance) -> Result<()> {
+            let owner = self.env().caller();
+            self.allowances.insert((owner, spender), value);
+            self.env().emit_event(Approval {
+                owner,
+                spender,
+                value,
+            });
+            Ok(())
+        }
+
+        /// Transfers `value` tokens on the behalf of `from` to the account `to`.
+        ///
+        /// This can be used to allow a contract to transfer tokens on ones behalf and/or
+        /// to charge fees in sub-currencies, for example.
+        ///
+        /// On success a `Transfer` event is emitted.
+        ///
+        /// # Errors
+        ///
+        /// Returns `InsufficientAllowance` error if there are not enough tokens allowed
+        /// for the caller to withdraw from `from`.
+        ///
+        /// Returns `InsufficientBalance` error if there are not enough tokens on
+        /// the the account balance of `from`.
+        #[ink(message)]
+        pub fn transfer_from(
+            &mut self,
+            from: AccountId,
+            to: AccountId,
+            value: Balance,
+        ) -> Result<()> {
+            let caller = self.env().caller();
+            let allowance = self.allowance(from, caller);
+            if allowance < value {
+                return Err(Error::InsufficientAllowance)
+            }
+            self.transfer_from_to(from, to, value)?;
+            self.allowances.insert((from, caller), allowance - value);
+            Ok(())
+        }
+
+        /// Transfers `value` amount of tokens from the caller's account to account `to`.
+        ///
+        /// On success a `Transfer` event is emitted.
+        ///
+        /// # Errors
+        ///
+        /// Returns `InsufficientBalance` error if there are not enough tokens on
+        /// the caller's account balance.
+        fn transfer_from_to(
+            &mut self,
+            from: AccountId,
+            to: AccountId,
+            value: Balance,
+        ) -> Result<()> {
+            let from_balance = self.balance_of(from);
+            if from_balance < value {
+                return Err(Error::InsufficientBalance)
+            }
+            self.balances.insert(from, from_balance - value);
+            let to_balance = self.balance_of(to);
+            self.balances.insert(to, to_balance + value);
+            self.env().emit_event(Transfer {
+                from: Some(from),
+                to: Some(to),
+                value,
+            });
+            Ok(())
+        }
+
+        fn _burn(&mut self, to: AddressId, value: Balance) {
+            let to_balance = self.balance_of(to);
+            self.balances.insert(to, to_balance - value);
+
+            self.total_supply -= value;
+        }
+
+        fn _mint(&mut self, to: AddressId, value: Balance) {
+            let to_balance = self.balance_of(to);
+            self.balances.insert(to, to_balance + value);
+
+            self.total_supply += value;
+        }
+
+        fn update(&mut self, balance0:Balance, balance1:Balance, reserve0:Balance, reserve1:`Balance){
+            self.reserve0 = balance0;
+            self.reserve1 = balance1;
+
+            self.env().emit_event(Sync(self.reserve0, self.reserve1));
+        }
+
 
     }
 
